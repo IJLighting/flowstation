@@ -6842,8 +6842,8 @@ async function saveTeiSecurity(){
   if(mode==='allowlist'){
     for(const raw of parseLines('tei-whitelist-input')){
       if(!/^\\d+$/.test(raw)){setTeiSecurityMsg('TEIs must be decimal integers.',false);return;}
-      const n=Number(raw);if(!Number.isSafeInteger(n)||n<1||n>=2**60){setTeiSecurityMsg('Each TEI must be between 1 and 2^60-1.',false);return;}
-      tei_whitelist.push(n);
+      let n;try{n=BigInt(raw);}catch{setTeiSecurityMsg('Invalid TEI.',false);return;}if(n<1n||n>=(1n<<60n)){setTeiSecurityMsg('Each TEI must be between 1 and 2^60-1.',false);return;}
+      tei_whitelist.push(raw);
     }
   }
   const pairs=[];
@@ -6852,9 +6852,9 @@ async function saveTeiSecurity(){
     for(const line of lines){
       const parts=line.split(/[\\s,;]+/).filter(Boolean);
       if(parts.length!==2||!/^\\d+$/.test(parts[0])||!/^\\d+$/.test(parts[1])){setTeiSecurityMsg('Each pair must be ISSI, TEI on one line.',false);return;}
-      const issi=Number(parts[0]),tei=Number(parts[1]);
-      if(!Number.isSafeInteger(issi)||issi<1||issi>16777215||!Number.isSafeInteger(tei)||tei<1||tei>=2**60){setTeiSecurityMsg('ISSI must be 1–16777215 and TEI 1–2^60-1.',false);return;}
-      pairs.push({issi,tei});
+      const issi=Number(parts[0]);let tei;try{tei=BigInt(parts[1]);}catch{setTeiSecurityMsg('Invalid TEI.',false);return;}
+      if(!Number.isSafeInteger(issi)||issi<1||issi>16777215||tei<1n||tei>=(1n<<60n)){setTeiSecurityMsg('ISSI must be 1–16777215 and TEI 1–2^60-1.',false);return;}
+      pairs.push({issi,tei:parts[1]});
     }
   }
   try{
