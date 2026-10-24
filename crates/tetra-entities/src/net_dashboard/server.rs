@@ -3101,9 +3101,9 @@ fn serve_tei_security_get(mut stream: TcpStream, shared_config: &Option<tetra_co
     }).unwrap_or("off");
     let whitelist = sec.as_ref().map(|s| s.tei_whitelist.clone()).unwrap_or_default();
     let pairs = sec.as_ref().map(|s| s.issi_tei_pairs.clone()).unwrap_or_default();
-    let pair_json: Vec<String> = pairs.iter().map(|(i,t)| format!("{{\"issi\":{},\"tei\":{}}}", i, t)).collect();
+    let pair_json: Vec<String> = pairs.iter().map(|(i,t)| format!("{{\"issi\":{},\"tei\":\"{}\"}}", i, t)).collect();
     let body = format!("{{\"mode\":\"{}\",\"tei_whitelist\":[{}],\"pairs\":[{}],\"restart_required\":true}}",
-        mode, whitelist.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(","),
+        mode, whitelist.iter().map(|n| format!("\"{}\"", n)).collect::<Vec<_>>().join(","),
         pair_json.join(","));
     let header = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
     let _ = stream.write_all(header.as_bytes()); let _ = stream.write_all(body.as_bytes());
