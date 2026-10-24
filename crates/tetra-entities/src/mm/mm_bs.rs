@@ -62,6 +62,9 @@ pub struct MmBs {
     /// ghost while it re-registers (see `maybe_reactive_recovery`). Independent of `recovery`
     /// above â€” populated even when the proactive cache is disabled.
     reactive_recovery_cooldown: HashMap<u32, std::time::Instant>,
+    /// TEIs can arrive before the first location update creates a client. Keep a bounded cache
+    /// so the registration gate can validate that signalling order without losing the identity.
+    pending_tei: HashMap<u32, u64>,
 }
 
 /// Safety cap on `reactive_recovery_cooldown` so a churn of distinct unknown ISSIs can't grow it
@@ -98,6 +101,7 @@ impl MmBs {
             recovery_attempts: HashMap::new(),
             recovery_last_frame: None,
             reactive_recovery_cooldown: HashMap::new(),
+            pending_tei: HashMap::new(),
         }
     }
 
@@ -483,6 +487,28 @@ impl MmBs {
         // migration release), so a non-whitelisted ISSI can never mutate state. It used to sit
         // after the migration branch, which let a barred radio tear a victim down before the gate
         // was ever consulted.
+        // TEI gate runs before migration handling, rate-limit accounting, registry mutation or
+        // Brew updates. TEI may have arrived before the client existed, so consult the pending
+        // cache first and then any TEI retained in the current client state.
+        let configured_tei_mode = self.config.config().security.tei_mode;
+        let received_tei = self.pending_tei.get(&issi).copied()
+            .or_else(|| self.client_mgr.get_client_by_issi(issi).and_then(|client| client.tei));
+        if !self.config.config().security.is_tei_allowed(issi, received_tei) {
+            tracing::warn!(
+                "MM: ISSI {} registration rejected by TEI security (mode {:?}, TEI {:?})",
+                issi, configured_tei_mode, received_tei
+            );
+            Self::send_d_location_update_reject_cause(
+                queue,
+                issi,
+                handle,
+                pdu.location_update_type,
+                pdu.address_extension,
+                RejectCause::ItsiAtsiUnknown,
+            );
+            return;
+        }
+
         if !self.issi_allowed(issi) {
             tracing::warn!("MM: ISSI {} not in whitelist, rejecting registration", issi);
             // Access-control cause, NOT MigrationNotSupported: telling a barred radio "migration
@@ -649,6 +675,9 @@ impl MmBs {
         if is_new {
             match self.client_mgr.try_register_client(issi, true) {
                 Ok(_) => {
+                    if let Some(tei) = received_tei {
+                        let _ = self.client_mgr.set_client_tei(issi, tei);
+                    }
                     self.config.state_write().subscribers.register(issi);
                 }
                 Err(e) => {
@@ -1976,9 +2005,18 @@ impl MmBs {
         let issi = prim.received_address.ssi;
         tracing::info!("MM: TEI received from ISSI {} â†’ TEI={} ({:060b})", issi, pdu.tei_hex(), pdu.tei,);
 
-        // Store TEI in client state for future use (e.g. whitelist checking)
+        // Cache TEI even when U-TEI-PROVIDE precedes location registration. Bound the cache
+        // so arbitrary unregistered ISSIs cannot grow memory without limit.
+        if self.pending_tei.len() >= 4096 && !self.pending_tei.contains_key(&issi) {
+            if let Some(oldest_issi) = self.pending_tei.keys().next().copied() {
+                self.pending_tei.remove(&oldest_issi);
+            }
+        }
+        self.pending_tei.insert(issi, pdu.tei);
+
+        // If already registered, keep its client state in sync as well.
         if let Err(e) = self.client_mgr.set_client_tei(issi, pdu.tei) {
-            tracing::warn!("MM: failed to store TEI for ISSI {}: {:?}", issi, e);
+            tracing::debug!("MM: TEI cached for not-yet-registered ISSI {}: {:?}", issi, e);
         }
     }
 
