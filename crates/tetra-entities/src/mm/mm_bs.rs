@@ -82,8 +82,9 @@ impl MmBs {
             // TOML alone (an empty issi_whitelist means "open" under the legacy default), and the
             // air interface is unauthenticated regardless — so say both, once, unmissably.
             tracing::warn!(
-                "MM: access control posture: {} | air-interface authentication (EN 300 392-7 TEA) is NOT implemented — any radio can claim any ISSI; the whitelist is the only gate",
-                sec.access_control_posture()
+                "MM: access control posture: {} | TEI registration policy: {:?} | air-interface authentication (EN 300 392-7 TEA) is NOT implemented; ISSI/TEI checks are identifiers, not cryptographic proof",
+                sec.access_control_posture(),
+                sec.tei_mode
             );
             if sec.honour_unauthenticated_detach {
                 tracing::warn!(
