@@ -55,6 +55,22 @@ impl TeiSecurityMode {
 /// Default cap on the MM client registry. Uplink is unauthenticated (EN 300 392-7 TEA is not
 /// implemented), so any radio can claim any of the 2^24 ISSIs — without a cap a registration
 /// flood grows the registry until the cell is OOM-killed.
+/// TOML table keys are strings even when they represent numeric ISSIs. Parse them
+/// explicitly rather than asking serde's map-key deserializer to coerce a string to u32.
+fn deserialize_issi_tei_pairs<'de, D>(deserializer: D) -> Result<HashMap<u32, u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = HashMap::<String, u64>::deserialize(deserializer)?;
+    raw.into_iter()
+        .map(|(key, tei)| {
+            key.parse::<u32>()
+                .map(|issi| (issi, tei))
+                .map_err(serde::de::Error::custom)
+        })
+        .collect()
+}
+
 pub const DEFAULT_MAX_REGISTERED_CLIENTS: usize = 2048;
 /// Default accepted registrations per minute, per source ISSI. Generous for a real radio (T351
 /// plus a post-PTT roaming update), tight enough that one forged ISSI cannot churn the registry.
@@ -157,7 +173,7 @@ pub struct CfgSecurityDto {
     pub tei_mode: Option<String>,
     #[serde(default)]
     pub tei_whitelist: Vec<u64>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_issi_tei_pairs")]
     pub issi_tei_pairs: HashMap<u32, u64>,
     #[serde(default)]
     pub honour_unauthenticated_detach: Option<bool>,
