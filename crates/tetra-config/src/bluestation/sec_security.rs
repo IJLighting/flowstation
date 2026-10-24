@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use std::collections::HashMap;
 
 /// How `issi_whitelist` is interpreted. A bare `Vec` cannot express "deny everyone": an operator
 /// who empties the list to lock the cell down actually opens it fully under the legacy semantics.
@@ -27,6 +28,30 @@ impl WhitelistMode {
     }
 }
 
+/// How TEI-based registration control is applied. TEI is an identifier, not cryptographic
+/// authentication; use air-interface TEA when implemented for cryptographic assurance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TeiSecurityMode {
+    /// Preserve existing behaviour: TEI is recorded but does not gate registration.
+    #[default]
+    Off,
+    /// A terminal's TEI must appear in tei_whitelist.
+    Allowlist,
+    /// The received ISSI must map to exactly the received TEI in issi_tei_pairs.
+    Paired,
+}
+
+impl TeiSecurityMode {
+    fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "off" | "disabled" | "none" => Some(Self::Off),
+            "allowlist" | "allow-list" | "tei_allowlist" => Some(Self::Allowlist),
+            "paired" | "pair" | "issi_tei" => Some(Self::Paired),
+            _ => None,
+        }
+    }
+}
+
 /// Default cap on the MM client registry. Uplink is unauthenticated (EN 300 392-7 TEA is not
 /// implemented), so any radio can claim any of the 2^24 ISSIs — without a cap a registration
 /// flood grows the registry until the cell is OOM-killed.
@@ -46,6 +71,12 @@ pub struct CfgSecurity {
     pub issi_whitelist: Vec<u32>,
     /// See [`WhitelistMode`].
     pub whitelist_mode: WhitelistMode,
+    /// TEI policy. Defaults to Off for backwards compatibility.
+    pub tei_mode: TeiSecurityMode,
+    /// Permitted 60-bit TEIs when tei_mode = Allowlist.
+    pub tei_whitelist: Vec<u64>,
+    /// Exact ISSI -> TEI bindings when tei_mode = Paired.
+    pub issi_tei_pairs: HashMap<u32, u64>,
     /// Honour an unauthenticated U-ITSI-DETACH / migrating location update as a teardown of the
     /// claimed ISSI. There is no air-interface authentication, so such a PDU is forgeable and a
     /// replay is a targeted DoS; an operator who does not need detach at all can switch it off.
@@ -61,6 +92,9 @@ impl Default for CfgSecurity {
         CfgSecurity {
             issi_whitelist: Vec::new(),
             whitelist_mode: WhitelistMode::Auto,
+            tei_mode: TeiSecurityMode::Off,
+            tei_whitelist: Vec::new(),
+            issi_tei_pairs: HashMap::new(),
             honour_unauthenticated_detach: true,
             max_registered_clients: DEFAULT_MAX_REGISTERED_CLIENTS,
             registration_rate_limit_per_min: DEFAULT_REGISTRATION_RATE_LIMIT_PER_MIN,
@@ -83,6 +117,16 @@ impl CfgSecurity {
             WhitelistMode::Open => true,
             WhitelistMode::Auto => list.is_empty() || list.contains(&issi),
             WhitelistMode::Enforce => list.contains(&issi),
+        }
+    }
+
+    /// Returns true if the supplied TEI satisfies the configured TEI policy for this ISSI.
+    /// In enabled modes, a missing TEI always fails closed.
+    pub fn is_tei_allowed(&self, issi: u32, tei: Option<u64>) -> bool {
+        match self.tei_mode {
+            TeiSecurityMode::Off => true,
+            TeiSecurityMode::Allowlist => tei.is_some_and(|t| self.tei_whitelist.contains(&t)),
+            TeiSecurityMode::Paired => tei.is_some_and(|t| self.issi_tei_pairs.get(&issi) == Some(&t)),
         }
     }
 
@@ -110,6 +154,12 @@ pub struct CfgSecurityDto {
     #[serde(default)]
     pub whitelist_mode: Option<String>,
     #[serde(default)]
+    pub tei_mode: Option<String>,
+    #[serde(default)]
+    pub tei_whitelist: Vec<u64>,
+    #[serde(default)]
+    pub issi_tei_pairs: HashMap<u32, u64>,
+    #[serde(default)]
     pub honour_unauthenticated_detach: Option<bool>,
     #[serde(default)]
     pub max_registered_clients: Option<usize>,
@@ -126,9 +176,13 @@ pub fn apply_security_patch(dto: CfgSecurityDto) -> CfgSecurity {
         .as_deref()
         .map(|s| WhitelistMode::parse(s).unwrap_or(WhitelistMode::Auto))
         .unwrap_or(WhitelistMode::Auto);
+    let tei_mode = dto.tei_mode.as_deref().and_then(TeiSecurityMode::parse).unwrap_or(TeiSecurityMode::Off);
     CfgSecurity {
         issi_whitelist: dto.issi_whitelist,
         whitelist_mode,
+        tei_mode,
+        tei_whitelist: dto.tei_whitelist,
+        issi_tei_pairs: dto.issi_tei_pairs,
         honour_unauthenticated_detach: dto.honour_unauthenticated_detach.unwrap_or(defaults.honour_unauthenticated_detach),
         max_registered_clients: dto.max_registered_clients.unwrap_or(defaults.max_registered_clients),
         registration_rate_limit_per_min: dto
@@ -157,6 +211,25 @@ mod tests {
 
         cfg.whitelist_mode = WhitelistMode::Open;
         assert!(cfg.is_issi_allowed(5678), "open ignores the list entirely");
+    }
+
+    #[test]
+    fn tei_modes_fail_closed_and_match_expected_identity() {
+        let mut cfg = CfgSecurity::default();
+        assert!(cfg.is_tei_allowed(1001, None), "off preserves legacy behaviour");
+
+        cfg.tei_mode = TeiSecurityMode::Allowlist;
+        cfg.tei_whitelist = vec![0x1234];
+        assert!(!cfg.is_tei_allowed(1001, None));
+        assert!(cfg.is_tei_allowed(1001, Some(0x1234)));
+        assert!(!cfg.is_tei_allowed(1001, Some(0x5678)));
+
+        cfg.tei_mode = TeiSecurityMode::Paired;
+        cfg.issi_tei_pairs.insert(1001, 0x1234);
+        assert!(cfg.is_tei_allowed(1001, Some(0x1234)));
+        assert!(!cfg.is_tei_allowed(1001, Some(0x5678)));
+        assert!(!cfg.is_tei_allowed(1002, Some(0x1234)));
+        assert!(!cfg.is_tei_allowed(1001, None));
     }
 
     /// The dashboard override replaces the list but not the mode.
