@@ -232,6 +232,22 @@ mod tests {
         assert!(!cfg.is_tei_allowed(1001, None));
     }
 
+    #[test]
+    fn tei_security_configuration_deserializes() {
+        let dto: CfgSecurityDto = toml::from_str(
+            r#"
+tei_mode = "paired"
+tei_whitelist = [1234]
+issi_tei_pairs = { "1001" = 1234, "1002" = 5678 }
+"#
+        ).expect("TEI settings should deserialize");
+        let cfg = apply_security_patch(dto);
+        assert_eq!(cfg.tei_mode, TeiSecurityMode::Paired);
+        assert_eq!(cfg.tei_whitelist, vec![1234]);
+        assert_eq!(cfg.issi_tei_pairs.get(&1001), Some(&1234));
+        assert!(cfg.is_tei_allowed(1001, Some(1234)));
+    }
+
     /// The dashboard override replaces the list but not the mode.
     #[test]
     fn override_list_follows_the_configured_mode() {
