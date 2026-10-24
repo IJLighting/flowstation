@@ -3565,6 +3565,39 @@ tbody tr:hover td{background:color-mix(in srgb,var(--bg3) 70%, transparent);}
         </div>
       </div>
 
+      <div class="card" style="margin-top:14px">
+        <div class="card-head">
+          <div class="card-title">TEI Registration Security</div>
+          <div class="card-actions"><span id="tei-security-status" class="badge">Loading…</span></div>
+        </div>
+        <div class="card-body">
+          <div class="help-text" style="margin-bottom:12px">
+            Configure a TEI allowlist or exact ISSI–TEI pairs. TEI is an identifier, not cryptographic authentication.
+            Changes are saved to the config file and require a FlowStation restart.
+          </div>
+          <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px;align-items:center">
+            <label class="h-flabel" for="tei-mode">TEI mode</label>
+            <select id="tei-mode" class="form-input" style="max-width:240px" onchange="renderTeiMode()">
+              <option value="off">Off (legacy)</option>
+              <option value="allowlist">TEI allowlist</option>
+              <option value="paired">ISSI–TEI paired</option>
+            </select>
+          </div>
+          <div id="tei-allowlist-panel" style="display:none">
+            <label class="h-flabel" for="tei-whitelist-input">Allowed TEIs (60-bit, one per line)</label>
+            <textarea id="tei-whitelist-input" class="form-input" rows="4" placeholder="123456789012345678"></textarea>
+          </div>
+          <div id="tei-paired-panel" style="display:none;margin-top:12px">
+            <label class="h-flabel" for="tei-pairs-input">ISSI and TEI pairs (one pair per line: ISSI, TEI)</label>
+            <textarea id="tei-pairs-input" class="form-input" rows="5" placeholder="2260571, 123456789012345678"></textarea>
+          </div>
+          <div style="display:flex;justify-content:flex-end;margin-top:12px">
+            <button class="btn btn-primary" onclick="saveTeiSecurity()"><span class="btn-icon" data-icon="save"></span>Save TEI Security</button>
+          </div>
+          <div class="config-msg" id="tei-security-msg"></div>
+        </div>
+      </div>
+
       <!-- ── WX / METAR SERVICE ──
            Built-in weather responder. On-demand: a radio SDSes "METAR <ICAO>" to the
            service ISSI and gets a decoded reply. Periodic: auto-sends a station's METAR
@@ -6777,11 +6810,60 @@ async function saveWhitelist(){
   try{
     const r=await fetch('/api/whitelist',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({issi_whitelist:whitelistEntries})});
-    if(r.ok){setWhitelistMsg(t('saved'),true);loadWhitelist();}
+    if(r.ok){setWhitelistMsg(t('saved'),true);loadWhitelist();loadTeiSecurity();}
     else setWhitelistMsg(t('save_fail')+': '+await r.text(),false);
   }catch{setWhitelistMsg(t('conn_error'),false);}
 }
 function setWhitelistMsg(txt,ok){const el=document.getElementById('whitelist-msg');el.textContent=txt;el.style.color=ok?'var(--accent)':'var(--danger)';setTimeout(()=>{if(el.textContent===txt)el.textContent='';},4000);}
+
+// ── TEI Registration Security ───────────────────────────────────────────────
+function renderTeiMode(){
+  const mode=document.getElementById('tei-mode').value;
+  document.getElementById('tei-allowlist-panel').style.display=mode==='allowlist'?'block':'none';
+  document.getElementById('tei-paired-panel').style.display=mode==='paired'?'block':'none';
+}
+async function loadTeiSecurity(){
+  try{
+    const r=await fetch('/api/tei-security');
+    if(!r.ok)throw new Error(await r.text());
+    const d=await r.json();
+    document.getElementById('tei-mode').value=d.mode||'off';
+    document.getElementById('tei-whitelist-input').value=(d.tei_whitelist||[]).join('\\n');
+    document.getElementById('tei-pairs-input').value=(d.pairs||[]).map(p=>p.issi+', '+p.tei).join('\\n');
+    renderTeiMode();
+    const badge=document.getElementById('tei-security-status');
+    badge.textContent=(d.mode||'off')==='off'?'TEI checks off':'TEI checks '+d.mode;
+  }catch(e){setTeiSecurityMsg('Could not load TEI settings: '+e.message,false);}
+}
+async function saveTeiSecurity(){
+  const mode=document.getElementById('tei-mode').value;
+  const parseLines=(id)=>document.getElementById(id).value.split(/[\\n,;\\s]+/).filter(Boolean);
+  const tei_whitelist=[];
+  if(mode==='allowlist'){
+    for(const raw of parseLines('tei-whitelist-input')){
+      if(!/^\\d+$/.test(raw)){setTeiSecurityMsg('TEIs must be decimal integers.',false);return;}
+      const n=Number(raw);if(!Number.isSafeInteger(n)||n<1||n>=2**60){setTeiSecurityMsg('Each TEI must be between 1 and 2^60-1.',false);return;}
+      tei_whitelist.push(n);
+    }
+  }
+  const pairs=[];
+  if(mode==='paired'){
+    const lines=document.getElementById('tei-pairs-input').value.split(/\\n/).map(x=>x.trim()).filter(Boolean);
+    for(const line of lines){
+      const parts=line.split(/[\\s,;]+/).filter(Boolean);
+      if(parts.length!==2||!/^\\d+$/.test(parts[0])||!/^\\d+$/.test(parts[1])){setTeiSecurityMsg('Each pair must be ISSI, TEI on one line.',false);return;}
+      const issi=Number(parts[0]),tei=Number(parts[1]);
+      if(!Number.isSafeInteger(issi)||issi<1||issi>16777215||!Number.isSafeInteger(tei)||tei<1||tei>=2**60){setTeiSecurityMsg('ISSI must be 1–16777215 and TEI 1–2^60-1.',false);return;}
+      pairs.push({issi,tei});
+    }
+  }
+  try{
+    const r=await fetch('/api/tei-security',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode,tei_whitelist,pairs})});
+    if(!r.ok){setTeiSecurityMsg(await r.text(),false);return;}
+    setTeiSecurityMsg(await r.text(),true);
+  }catch(e){setTeiSecurityMsg('Could not save TEI settings: '+e.message,false);}
+}
+function setTeiSecurityMsg(txt,ok){const el=document.getElementById('tei-security-msg');el.textContent=txt;el.style.color=ok?'var(--accent)':'var(--danger)';}
 
 // ── WX / METAR service ──────────────────────────────────────────────────────
 async function loadWx(){
