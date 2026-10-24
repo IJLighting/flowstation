@@ -2211,6 +2211,12 @@ fn handle_connection(
     } else if req_line.contains("POST /api/snom-notify") {
         let (inner, body_str) = read_post_body(stream);
         serve_snom_notify_post(inner, &shared_config, &config_path, &body_str);
+    } else if req_line.contains("GET /api/tei-security") {
+        let (inner, _) = read_post_body(stream);
+        serve_tei_security_get(inner, &shared_config);
+    } else if req_line.contains("POST /api/tei-security") {
+        let (inner, body_str) = read_post_body(stream);
+        serve_tei_security_post(inner, &shared_config, &config_path, &body_str);
     } else if req_line.contains("GET /api/whitelist") {
         let mut buf = BufReader::new(stream);
         loop {
@@ -3082,6 +3088,109 @@ fn serve_update_check(mut stream: TcpStream) {
     );
     let _ = stream.write_all(header.as_bytes());
     let _ = stream.write_all(body.as_bytes());
+}
+
+/// Dashboard TEI policy editor. Values are persisted to the TOML file; because StackConfig is
+/// immutable after startup, the operator must restart FlowStation for policy changes to take effect.
+fn serve_tei_security_get(mut stream: TcpStream, shared_config: &Option<tetra_config::bluestation::SharedConfig>) {
+    let sec = shared_config.as_ref().map(|c| c.config().security.clone());
+    let mode = sec.as_ref().map(|s| match s.tei_mode {
+        tetra_config::bluestation::TeiSecurityMode::Off => "off",
+        tetra_config::bluestation::TeiSecurityMode::Allowlist => "allowlist",
+        tetra_config::bluestation::TeiSecurityMode::Paired => "paired",
+    }).unwrap_or("off");
+    let whitelist = sec.as_ref().map(|s| s.tei_whitelist.clone()).unwrap_or_default();
+    let pairs = sec.as_ref().map(|s| s.issi_tei_pairs.clone()).unwrap_or_default();
+    let pair_json: Vec<String> = pairs.iter().map(|(i,t)| format!("{{\"issi\":{},\"tei\":{}}}", i, t)).collect();
+    let body = format!("{{\"mode\":\"{}\",\"tei_whitelist\":[{}],\"pairs\":[{}],\"restart_required\":true}}",
+        mode, whitelist.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(","),
+        pair_json.join(","));
+    let header = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+    let _ = stream.write_all(header.as_bytes()); let _ = stream.write_all(body.as_bytes());
+}
+
+fn write_tei_security_to_toml(config_path: &str, mode: &str, whitelist: &[u64], pairs: &[(u32,u64)]) -> std::io::Result<()> {
+    let original = std::fs::read_to_string(config_path)?;
+    let mut lines: Vec<String> = Vec::new();
+    let mut in_security = false;
+    let mut saw_security = false;
+    for line in original.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('[') && trimmed.contains(']') {
+            in_security = trimmed.starts_with("[security]");
+            saw_security |= in_security;
+        }
+        if in_security && ["tei_mode", "tei_whitelist", "issi_tei_pairs"].iter().any(|k| {
+            trimmed.starts_with(&format!("{} =", k)) || trimmed.starts_with(&format!("{}=", k))
+        }) { continue; }
+        lines.push(line.to_string());
+    }
+    if !saw_security { lines.push("[security]".to_string()); }
+    // Insert the assignments at the end of the [security] block, before the next section.
+    let mut insert = lines.len();
+    for (i,line) in lines.iter().enumerate() {
+        if i > 0 && line.trim_start().starts_with('[') && line.trim_start().contains(']') && line.trim_start().starts_with("[security]") {
+            insert = i + 1;
+        } else if i > 0 && insert < lines.len() && line.trim_start().starts_with('[') && line.trim_start().contains(']') {
+            insert = i; break;
+        }
+    }
+    let wl = format!("tei_whitelist = [{}]", whitelist.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(", "));
+    let map = format!("issi_tei_pairs = {{ {} }}", pairs.iter().map(|(i,t)| format!("\"{}\" = {}", i,t)).collect::<Vec<_>>().join(", "));
+    lines.splice(insert..insert, [format!("tei_mode = \"{}\"", mode), wl, map]);
+    let mut output = lines.join("\n");
+    if original.ends_with('\n') { output.push('\n'); }
+    let backup = format!("{}.tei-security.bak", config_path);
+    let _ = std::fs::copy(config_path, backup);
+    std::fs::write(config_path, output)
+}
+
+fn serve_tei_security_post(stream: TcpStream, shared_config: &Option<tetra_config::bluestation::SharedConfig>, config_path: &str, body: &str) {
+    let json: serde_json::Value = match serde_json::from_str(body.trim()) {
+        Ok(v) => v, Err(e) => { http_response(stream, 400, &format!("Invalid JSON: {e}")); return; }
+    };
+    let mode = json.get("mode").and_then(|v| v.as_str()).unwrap_or("off");
+    if !["off", "allowlist", "paired"].contains(&mode) {
+        http_response(stream, 400, "mode must be off, allowlist, or paired"); return;
+    }
+    let mut whitelist = Vec::<u64>::new();
+    if let Some(items) = json.get("tei_whitelist").and_then(|v| v.as_array()) {
+        for item in items {
+            let n = item.as_u64().or_else(|| item.as_str().and_then(|s| s.parse().ok()));
+            let Some(n) = n.filter(|n| *n > 0 && *n < (1u64 << 60)) else {
+                http_response(stream, 400, "TEIs must be integers in range 1..2^60-1"); return;
+            };
+            whitelist.push(n);
+        }
+    } else { http_response(stream, 400, "tei_whitelist must be an array"); return; }
+    whitelist.sort_unstable(); whitelist.dedup();
+
+    let mut pairs = Vec::<(u32,u64)>::new();
+    if let Some(items) = json.get("pairs").and_then(|v| v.as_array()) {
+        let mut seen = std::collections::HashSet::new();
+        for item in items {
+            let issi = item.get("issi").and_then(|v| v.as_u64());
+            let tei = item.get("tei").and_then(|v| v.as_u64());
+            let (Some(issi),Some(tei)) = (issi,tei) else { http_response(stream,400,"Each pair needs numeric issi and tei"); return; };
+            if issi == 0 || issi > 0xFF_FFFF || tei == 0 || tei >= (1u64 << 60) {
+                http_response(stream,400,"ISSI must be 1..16777215 and TEI must be 1..2^60-1"); return;
+            }
+            if !seen.insert(issi as u32) { http_response(stream,400,"Each ISSI may appear only once in paired mode"); return; }
+            pairs.push((issi as u32,tei));
+        }
+    } else { http_response(stream,400,"pairs must be an array"); return; }
+    if mode == "allowlist" && whitelist.is_empty() {
+        http_response(stream,400,"TEI allowlist mode requires at least one TEI"); return;
+    }
+    if mode == "paired" && pairs.is_empty() {
+        http_response(stream,400,"Paired mode requires at least one ISSI–TEI pair"); return;
+    }
+    if shared_config.is_none() { http_response(stream,503,"Config not available"); return; }
+    if let Err(e) = write_tei_security_to_toml(config_path, mode, &whitelist, &pairs) {
+        http_response(stream,500,&format!("Could not persist TEI security settings: {e}")); return;
+    }
+    tracing::warn!("Dashboard: TEI security saved in config; restart required before it takes effect");
+    http_response(stream,200,"Saved. Restart FlowStation to apply TEI security changes.");
 }
 
 /// GET /api/whitelist — return the effective whitelist as JSON:
