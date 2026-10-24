@@ -3170,7 +3170,7 @@ fn serve_tei_security_post(stream: TcpStream, shared_config: &Option<tetra_confi
         let mut seen = std::collections::HashSet::new();
         for item in items {
             let issi = item.get("issi").and_then(|v| v.as_u64());
-            let tei = item.get("tei").and_then(|v| v.as_u64());
+            let tei = item.get("tei").and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok())));
             let (Some(issi),Some(tei)) = (issi,tei) else { http_response(stream,400,"Each pair needs numeric issi and tei"); return; };
             if issi == 0 || issi > 0xFF_FFFF || tei == 0 || tei >= (1u64 << 60) {
                 http_response(stream,400,"ISSI must be 1..16777215 and TEI must be 1..2^60-1"); return;
