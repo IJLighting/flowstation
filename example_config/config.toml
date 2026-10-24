@@ -391,7 +391,18 @@ voice_service = true
 # Leave empty or omit the section entirely to accept any terminal (open network).
 #
 # [security]
+# ISSI access control (existing):
 # issi_whitelist = [2260571, 2260572, 2260575]
+# whitelist_mode = "enforce"  # auto (legacy), open, enforce
+
+# Optional TEI registration gate. TEI is a 60-bit identifier, NOT cryptographic authentication.
+# Leave off for legacy behaviour. When enabled, a location update without a previously received
+# TEI is rejected; radios must send U-TEI-PROVIDE before registration.
+# tei_mode = "off"             # off | allowlist | paired
+# tei_mode = "allowlist"
+# tei_whitelist = [123456789012345678] # 60-bit TEIs, decimal integers
+# tei_mode = "paired"
+# issi_tei_pairs = { "2260571" = 123456789012345678, "2260572" = 987654321098765432 }
 
 ###############################################################################
 
