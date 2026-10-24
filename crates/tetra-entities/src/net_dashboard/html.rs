@@ -6828,8 +6828,8 @@ async function loadTeiSecurity(){
     if(!r.ok)throw new Error(await r.text());
     const d=await r.json();
     document.getElementById('tei-mode').value=d.mode||'off';
-    document.getElementById('tei-whitelist-input').value=(d.tei_whitelist||[]).join('\\n');
-    document.getElementById('tei-pairs-input').value=(d.pairs||[]).map(p=>p.issi+', '+p.tei).join('\\n');
+    document.getElementById('tei-whitelist-input').value=(d.tei_whitelist||[]).join('\n');
+    document.getElementById('tei-pairs-input').value=(d.pairs||[]).map(p=>p.issi+', '+p.tei).join('\n');
     renderTeiMode();
     const badge=document.getElementById('tei-security-status');
     badge.textContent=(d.mode||'off')==='off'?'TEI checks off':'TEI checks '+d.mode;
@@ -6837,21 +6837,21 @@ async function loadTeiSecurity(){
 }
 async function saveTeiSecurity(){
   const mode=document.getElementById('tei-mode').value;
-  const parseLines=(id)=>document.getElementById(id).value.split(/[\\n,;\\s]+/).filter(Boolean);
+  const parseLines=(id)=>document.getElementById(id).value.split(/[\n,;\s]+/).filter(Boolean);
   const tei_whitelist=[];
   if(mode==='allowlist'){
     for(const raw of parseLines('tei-whitelist-input')){
-      if(!/^\\d+$/.test(raw)){setTeiSecurityMsg('TEIs must be decimal integers.',false);return;}
+      if(!/^\d+$/.test(raw)){setTeiSecurityMsg('TEIs must be decimal integers.',false);return;}
       let n;try{n=BigInt(raw);}catch{setTeiSecurityMsg('Invalid TEI.',false);return;}if(n<1n||n>=(1n<<60n)){setTeiSecurityMsg('Each TEI must be between 1 and 2^60-1.',false);return;}
       tei_whitelist.push(raw);
     }
   }
   const pairs=[];
   if(mode==='paired'){
-    const lines=document.getElementById('tei-pairs-input').value.split(/\\n/).map(x=>x.trim()).filter(Boolean);
+    const lines=document.getElementById('tei-pairs-input').value.split(/\n/).map(x=>x.trim()).filter(Boolean);
     for(const line of lines){
-      const parts=line.split(/[\\s,;]+/).filter(Boolean);
-      if(parts.length!==2||!/^\\d+$/.test(parts[0])||!/^\\d+$/.test(parts[1])){setTeiSecurityMsg('Each pair must be ISSI, TEI on one line.',false);return;}
+      const parts=line.split(/[\s,;]+/).filter(Boolean);
+      if(parts.length!==2||!/^\d+$/.test(parts[0])||!/^\d+$/.test(parts[1])){setTeiSecurityMsg('Each pair must be ISSI, TEI on one line.',false);return;}
       const issi=Number(parts[0]);let tei;try{tei=BigInt(parts[1]);}catch{setTeiSecurityMsg('Invalid TEI.',false);return;}
       if(!Number.isSafeInteger(issi)||issi<1||issi>16777215||tei<1n||tei>=(1n<<60n)){setTeiSecurityMsg('ISSI must be 1–16777215 and TEI 1–2^60-1.',false);return;}
       pairs.push({issi,tei:parts[1]});
